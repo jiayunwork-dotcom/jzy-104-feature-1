@@ -1,0 +1,17 @@
+{
+  "name": "uniform-corrosion-rate-service",
+  "version": "1.0.0",
+  "description": "基于法拉第电化学当量的均匀腐蚀速率核算 HTTP 服务",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "fastify": "^4.28.1"
+  }
+}
