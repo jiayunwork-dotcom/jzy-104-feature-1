@@ -8,10 +8,15 @@ const { ValidationError, NotFoundError, ConflictError } = require('./errors');
 const {
   validateMaterialInput,
   validateCalculationInput,
+  validateEquipmentInput,
+  parseReadingsPayload,
+  validateStatusQuery,
 } = require('./validation');
 const { MaterialRepository } = require('./materials/repository');
 const { seedDefaultMaterials } = require('./materials/seed');
 const { CorrosionService } = require('./corrosion-service');
+const { EquipmentRepository } = require('./equipment/repository');
+const { EquipmentService } = require('./equipment/service');
 
 function buildApp(options = {}) {
   const app = Fastify({
@@ -22,7 +27,12 @@ function buildApp(options = {}) {
   const service = new CorrosionService(repository);
   seedDefaultMaterials(repository); // 预置铁-海水基准档
 
+  const equipmentRepository = new EquipmentRepository();
+  const equipmentService = new EquipmentService(equipmentRepository, repository);
+
   // 统一把已知业务错误映射为带原因的错误响应，不抛出裸 500。
+  // 批量读数这类错误会附带 details（出问题的条目清单），原样透传；
+  // 既有错误不带 details，响应字段与之前完全一致。
   app.setErrorHandler((error, request, reply) => {
     if (
       error instanceof ValidationError ||
@@ -34,6 +44,7 @@ function buildApp(options = {}) {
         message: error.message,
         field: error.field,
         reason: error.reason,
+        ...(error.details !== undefined ? error.details : {}),
       });
     }
     request.log.error(error);
@@ -67,6 +78,54 @@ function buildApp(options = {}) {
   app.post('/corrosion/calculate', async (request) => {
     const input = validateCalculationInput(request.body);
     return service.calculate(input);
+  });
+
+  // 登记受监测设备：材料档没登记过 → 404，字段不合法 → 400，重名 → 409
+  app.post('/equipment', async (request, reply) => {
+    const input = validateEquipmentInput(request.body);
+    const created = equipmentService.register(input);
+    return reply.status(201).send(created);
+  });
+
+  // 列出受监测设备清单
+  app.get('/equipment', async () => ({
+    count: equipmentRepository.list().length,
+    equipment: equipmentRepository.list(),
+  }));
+
+  // 按名取设备登记信息
+  app.get('/equipment/:name', async (request) => {
+    return equipmentRepository.get(request.params.name);
+  });
+
+  // 批量提交读数：整批校验，任一条目出问题则整批不入库。
+  // 条目格式不合法 → 400（并附上同时存在的时间戳冲突）；仅时间戳冲突 → 409。
+  app.post('/equipment/:name/readings', async (request, reply) => {
+    const name = request.params.name;
+    equipmentRepository.getRef(name); // 设备未登记 → 404
+    const { entries, errors } = parseReadingsPayload(request.body);
+    const conflicts = equipmentRepository.findConflicts(name, entries);
+    if (errors.length > 0) {
+      const error = new ValidationError(
+        'readings',
+        `有 ${errors.length} 条读数不合法，整批未入库`
+      );
+      error.details = { errors };
+      if (conflicts.length > 0) error.details.conflicts = conflicts;
+      throw error;
+    }
+    const result = equipmentRepository.addReadings(name, entries); // 冲突 → 409
+    return reply.status(201).send({
+      equipment: name,
+      inserted: result.inserted,
+      readingCount: result.readingCount,
+    });
+  });
+
+  // 设备状态：累计壁厚损失/失重、剩余壁厚与裕量、缺口、越线时刻或剩余寿命预测
+  app.get('/equipment/:name/status', async (request) => {
+    const { asOfMs, windowDays } = validateStatusQuery(request.query);
+    return equipmentService.status(request.params.name, { asOfMs, windowDays });
   });
 
   return app;
